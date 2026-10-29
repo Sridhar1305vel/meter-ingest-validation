@@ -15,7 +15,7 @@ conflicting resends, and gaps.**
 |---|---|
 | `POST /readings` | Ingest a batch. Bad rows are rejected individually with a reason; identical resends are ignored; conflicting resends are flagged and the stored value is kept. |
 | `GET /anomalies?date=YYYY-MM-DD[&meter_id=][&kind=]` | Anomalies for one **local** day: missing intervals, negative consumption, implausible jumps, rollovers, duplicates, conflicts. Also returns `expected_intervals` (92 / 96 / 100). |
-| `GET /reconciliation?date=...&scale=...&tolerance_pct=5` | Sum of metered consumption vs `grid total x scale`, per interval, with a day summary. |
+| `GET /reconciliation?date=...[&area=][&scale=][&tolerance_pct=]` | Sum of metered consumption vs `grid total x scale`, per interval, with a day summary. Default tolerance is 5 %. |
 | `PUT /grid-totals` | Load grid totals (kWh per interval start). |
 | `GET /health` | Liveness and database check. |
 
@@ -47,11 +47,14 @@ Interactive docs at `http://localhost:8000/docs`.
 
 Reconciliation compares an interval only when **every known meter reported it** and a grid value exists.
 Other intervals are counted as `incomplete_intervals` / `no_grid_value_intervals`, not silently dropped, because a
-sum over a partial fleet is understated by construction.
+sum over a partial fleet is understated by construction. Because every interval that touches a missing reading is
+excluded, a gap of N consecutive missing readings makes N + 1 intervals incomplete.
 
-## Run it (Linux)
+## Run it
 
 Requirements: Docker with the Compose plugin, Python 3.12 for the tests.
+
+### Linux / macOS
 
 ```bash
 docker compose up -d --build --wait     # PostgreSQL 16 + API on :8000
@@ -66,7 +69,22 @@ curl -s "localhost:8000/reconciliation?date=2026-03-30&scale=0.001"
 docker compose down -v
 ```
 
-Run the tests (the PostgreSQL variants use the compose database on port 5433):
+### Windows (PowerShell)
+
+Use `Invoke-RestMethod` (or `curl.exe`; plain `curl` is an alias for `Invoke-WebRequest`).
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/health
+python -m scripts.generate_synthetic --meters 20 --api http://127.0.0.1:8000
+Invoke-RestMethod "http://127.0.0.1:8000/anomalies?date=2026-03-29" | ConvertTo-Json -Depth 10
+Invoke-RestMethod "http://127.0.0.1:8000/reconciliation?date=2026-03-30&scale=0.001" | ConvertTo-Json -Depth 10
+```
+
+`ConvertTo-Json -Depth 10` stops nested fields printing as `System.Object[]`.
+
+### Tests
+
+The PostgreSQL variants use the compose database on port 5433:
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
@@ -84,13 +102,15 @@ Without `TEST_DATABASE_URL` the PostgreSQL variants are skipped and the in-memor
 # 2. Parse it. All format assumptions are flags; see --help.
 python3 -m scripts.load_smard --file smard.csv --out data/grid.json --api http://localhost:8000
 # 3. Generate meters whose load follows the real grid shape; the script prints the matching --scale
-python3 -m scripts.generate_synthetic --grid-json data/grid.json --start <first day in your file> --api http://localhost:8000
+python3 -m scripts.generate_synthetic --grid-json data/grid.json --start <first day in your file> --days 3 --api http://localhost:8000
 ```
 
 The loader resolves the repeated local hour on the 25-hour day by order (test: `test_grid_loader_resolves_the_25_hour_day`).
 Verify the column layout and units of your own export before trusting the numbers.
 
-## Results (synthetic data, in-memory repository)
+## Results
+
+### Synthetic grid, in-memory repository
 
 * 7 fault types injected on 7 different meters (12-reading gap, single gap, one corrupted low reading, an
   80 kWh step, a register rollover, 5 identical resends, 3 conflicting resends). The detector reported exactly those
@@ -98,7 +118,29 @@ Verify the column layout and units of your own export before trusting the number
 * DST days: 92 and 100 expected intervals, **no false gaps** on clean data.
 * Reconciliation on a clean synthetic day: **-2.9 %** difference, matching the 3 % unmetered loss built into the
   synthetic grid (so it proves the mechanics, not realism). A 12-reading outage made 13 intervals `incomplete`, and they were excluded from the comparison.
-<!-- Add here after running against real SMARD data: day, scale, diff %, flagged intervals. -->
+
+### SMARD grid shape (area DE), synthetic meters, PostgreSQL
+
+Spring-forward day **2026-03-29** (92 expected intervals), 20 synthetic meters, meter load scaled from the
+SMARD series, tolerance 5 %:
+
+| Expected | Compared | Incomplete | Out of tolerance | Total difference |
+|---|---|---|---|---|
+| 92 | 79 | 13 | 0 | -0.04 % |
+
+* The 13 incomplete intervals come from one meter's 12-reading outage (10:45 to 13:30 local). A single missing
+  reading on another meter fell inside the same window and added no further intervals. They were reported by the
+  anomaly endpoint, excluded from the comparison, and not interpolated.
+* The -0.04 % total is **not a finding**: the meters are derived from the same grid series they are compared
+  against, so a near-zero difference is expected. What this run shows is that interval counting, DST alignment
+  and gap exclusion work against a real grid shape, not that the service is accurate on real meters.
+
+To reproduce (the `--scale` value is printed by the generator and depends on your `grid.json`):
+
+```powershell
+python -m scripts.generate_synthetic --grid-json data\grid.json --start 2026-03-28 --days 3 --api http://127.0.0.1:8000
+Invoke-RestMethod "http://127.0.0.1:8000/reconciliation?date=2026-03-29&scale=<printed scale>" | ConvertTo-Json -Depth 10
+```
 
 ## Design notes and limits
 
