@@ -72,7 +72,7 @@ Run the tests (the PostgreSQL variants use the compose database on port 5433):
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt
 docker compose up -d db --wait
-TEST_DATABASE_URL=postgresql://meter:meter@localhost:5433/meter pytest -q
+TEST_DATABASE_URL=postgresql://meter:meter@127.0.0.1:5433/meter pytest -q
 ```
 
 Without `TEST_DATABASE_URL` the PostgreSQL variants are skipped and the in-memory ones still run.
